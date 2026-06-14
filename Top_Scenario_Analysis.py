@@ -1,21 +1,16 @@
-import random
-from deap import base, creator, tools, algorithms
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import pytz
 from Constant_Factors import (
     NG_Tune, BL_Tune, Solar_Installed, Wind_Installed, Import_Limit, Hydro_Tune,
-    Solar_Tune, Wind_Tune, Surplus_Min, total_def_limit, Factor_NSC,
-    Factor_Smart_Charge, Full_EV_Fleet, c1, c2, NG_Installed, Hydro_Installed,
-    energy_sources, calculate_lcoe, calculate_combined_lcoe
+    Solar_Tune, Wind_Tune, total_def_limit, Factor_NSC,
+    Factor_Smart_Charge, Full_EV_Fleet, NG_Installed, Hydro_Installed,
+    energy_sources, calculate_lcoe
 )
-from Battery_Functions2 import calculate_battery_wear, interpolate_soc
+from Battery_Functions import calculate_battery_wear, interpolate_soc
 import os
 import math
 from pathlib import Path
-from itertools import product
-from concurrent.futures import ThreadPoolExecutor
 import json
 
 NG_Decrementor = True
@@ -36,14 +31,12 @@ EV_Battery_Cost = 10000
 Baseload_Installed = 5149
 V2G_Connect_Cost = 2000
 
-
 # Main simulation loop
 installed_solar = [Solar_Installed]
 installed_wind = [Wind_Installed * 3200]
 output_yearly = []
 output_hourly = []
 failed_constraints = []
-
 
 NG_Fact = 0
 
@@ -52,7 +45,7 @@ folder_name = f"Output_Files_Merge/V2G_{Factor_V2G}_SC_{Factor_Smart_Charge}_Nat
 os.makedirs(folder_name, exist_ok=True)
 
 # Load data
-csv_file_path = '/Users/g0g/PycharmProjects/Grid_Optimizer/Grid_Builder/ChargeTimeFix.csv'
+csv_file_path = 'Grid_Input_Data.csv'
 df = pd.read_csv(csv_file_path)
 df['Date'] = pd.date_range(start='2021-01-01 00:00', end='2021-12-30 23:00', freq='h')
 
@@ -272,6 +265,7 @@ def do_parallel_monte_carlo(
 
     for sim_index in range(n_simulations):
 
+        #print(f"Running Simulation {sim_index + 1}/{n_simulations}")
         failures = []
         max_def_max = 0
         all_deficits = []
@@ -343,7 +337,10 @@ def do_parallel_monte_carlo(
         wind_gen_sum = np.sum(wind_gen)
         hydro_gen_sum = np.sum(hydro_gen)
         natural_gas_gen_sum = np.sum(natural_gas_gen)
+        print(f"XXXXX natural gas gen sum is {natural_gas_gen_sum} NG fact is {NG_Fact}")
         nuclear_gen_sum = np.sum(nuclear_gen)
+        #print(f"BL installed is {BL_installed}, Nuclear sum is {nuclear_gen_sum}")
+        total_power_sum = solar_gen_sum + wind_gen_sum + hydro_gen_sum + nuclear_gen_sum + natural_gas_gen_sum
 
         power_deficit = demand - (solar_gen + wind_gen + nuclear_gen)
 
@@ -359,6 +356,7 @@ def do_parallel_monte_carlo(
         power_deficit_sort = power_deficit - realigned_natural_gas_gen - realigned_hydro_gen
 
         total_curtailment = 0
+        dj = 0
         total_v2g_tendered = 0
         Grid_Store = Grid_Store_Max * 0.6
         total_GS_used = 1
@@ -521,7 +519,7 @@ def do_parallel_monte_carlo(
         }
 
     if not battery_wear_calculated:
-        temp_data = pd.read_csv("/Users/g0g/PycharmProjects/Grid_Optimizer/Grid_Builder/CAL_Temps_Minutely.csv")[
+        temp_data = pd.read_csv("CAL_Temps_Minutely.csv")[
             'Temperature'].values
         V2G_minutely_bank = interpolate_soc(np.array(V2G_hourly_battery_bank))
         SC_minutely_bank = interpolate_soc(np.array(SC_hourly_battery_bank))
@@ -551,27 +549,13 @@ def do_parallel_monte_carlo(
         V2G_vehicle_count = Factor_V2G * Full_EV_Fleet * Share_EV_init * 1000
         V2G_Fleet_Cost = V2G_extra_cost_per_vehicle_year * V2G_vehicle_count
 
-        SC_extra_battery_carbon_cost = (
-                annual_extra_battery_carbon_cost(SC_extra_cost_per_vehicle_year)
-                * SC_vehicle_count
-        )
-
-        V2G_extra_battery_carbon_cost = (
-                annual_extra_battery_carbon_cost(V2G_extra_cost_per_vehicle_year)
-                * V2G_vehicle_count
-        )
-
-        total_extra_battery_wear_carbon_cost = (
-                SC_extra_battery_carbon_cost
-                + V2G_extra_battery_carbon_cost
-        )
-
         # Needed for V2G LCOE Calculation
         Number_V2G_Connections = Factor_V2G * Share_EV_init * Full_EV_Fleet
 
-
         demand_total = base_demand_sum + NSC_EV_Demand_sum + SCV2G_EV_Demand_sum
+        print(f"DEMAND TOTAL {demand_total} NSC_EV_Demand_sum {NSC_EV_Demand_sum}, SCV2G {SCV2G_EV_Demand_sum}")
         total_system_power = demand_total - total_deficit
+        print(f"XXXX TSP2 = {total_system_power}, total deficit is {total_deficit}")
         gross_generation_by_source = {
             "solar": solar_gen_sum,
             "wind": wind_gen_sum,
@@ -814,8 +798,18 @@ def do_parallel_monte_carlo(
             dynamic_values[source]['annual_energy_used_mwh']
             for source in lcoe_values
         )
+        print(f"WHAT ACTUALLY GOES IN LCOE TSP {total_system_power}")
         combined_lcoe = (weighted_costs + SC_Fleet_Annual_Cost + V2G_Fleet_Cost) / total_system_power
         return combined_lcoe
+
+    print("\n--- RAW LCOE DEBUG ---")
+    #print("BL variable:", BL_installed if "BL_installed" in globals() else None)
+    print("Baseload variable:", Baseload_Installed if "Baseload_Installed" in globals() else None)
+    print("demand_sum:", demand_sum)
+    print("total_ev_demand_sum:", total_ev_demand_sum)
+    print("demand_total:", demand_total)
+    print("total_deficit:", total_deficit)
+
 
     for source in lcoe_values:
         e = dynamic_values[source]["annual_energy_used_mwh"]
@@ -824,6 +818,12 @@ def do_parallel_monte_carlo(
         print(source, "capacity:", dynamic_values[source]["installed_capacity_mw"],
               "energy:", e, "lcoe:", l, "weighted_cost:", c,
               "system_contribution:", c / total_system_power)
+
+    print("V2G_CR:", V2G_CR)
+    print("V2G_DR:", V2G_DR)
+    print("SC_CR:", SC_CR)
+    print("Factor_V2G", Factor_V2G)
+
 
     combined_lcoe = calculate_combined_lcoe(lcoe_values, dynamic_values, total_system_power)
 
@@ -952,7 +952,11 @@ def do_parallel_monte_carlo(
 
 all_years_data = pd.DataFrame()
 
-
+reliability_cases = {
+    "6_of_10": 6,
+    "8_of_10": 8,
+    "10_of_10": 10,
+}
 
 initial_state = {
     "Solar_Installed": Solar_Installed,
@@ -965,221 +969,286 @@ initial_state = {
 
 all_reliability_outputs = {}
 
+for reliability_label, min_pass_count in reliability_cases.items():
+    print(f"\n==============================")
+    print(f"Running reliability case: {reliability_label}")
+    print(f"Minimum passes required: {min_pass_count}/10")
+    print(f"==============================\n")
 
-# ============================================================
-# MULTI-SCENARIO VALIDATOR
-# ============================================================
+    # Independent state for this reliability path
+    Solar_Installed = initial_state["Solar_Installed"]
+    Wind_Installed = initial_state["Wind_Installed"]
+    Baseload_Installed = initial_state["Baseload_Installed"]
+    Grid_Store_Max = initial_state["Grid_Store_Max"]
+    NG_Fact = initial_state["NG_Fact"]
+    NG_Installed = initial_state["NG_Installed"]
 
-SCENARIO_CSV_PATH = "CarbonAdjusted3S.csv"
-VALIDATION_RUNS_PER_SCENARIO = 50
-VALIDATION_YEAR = 2050
-DEFAULT_SHARE_EV_INIT = 0.98
-VALIDATION_OUTPUT_FOLDER = Path("Output_Files_Merge/validation_runs")
-VALIDATION_OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
+    output_yearly = []
 
+    reliability_folder_name = (
+        f"{folder_name}/{reliability_label}_pass_path"
+    )
+    os.makedirs(reliability_folder_name, exist_ok=True)
 
+    # ============================================================
+    # SINGLE 2050 NO-NATURAL-GAS AUDIT RUN
+    # ============================================================
 
-COLUMN_ALIASES = {
-    "Solar_Installed": ["Solar_Installed", "Installed_Solar", "Solar_Installed_MW"],
-    "Wind_Installed_MW": ["Wind_Installed", "Installed_Wind", "Wind_Installed_MW"],
-    "Baseload_Installed": ["Baseload_Installed", "BL_installed", "Installed_Nuclear", "Nuclear_Installed_MW"],
-    "Grid_Store_Max": ["Grid_Store_Max", "Installed_Grid_Batteries", "Grid_Store_Max_MWh"],
-    "Factor_V2G": ["Factor_V2G"],
-    "Factor_NSC": ["Factor_NSC"],
-    "Factor_Smart_Charge": ["Factor_Smart_Charge"],
-    "SC_CR": ["SC_CR", "CR"],
-    "V2G_CR": ["V2G_CR", "CR"],
-    "V2G_DR": ["V2G_DR", "CR"],
-    "SC_Floor": ["SC_Floor"],
-    "V2G_Floor": ["V2G_Floor"],
-    "Cap": ["Cap"],
-    "V2G_Connect_Cost": ["V2G_Connect_Cost"],
-    "Share_EV_init": ["Share_EV_init", "EV_Fleet_Size", "Share_EV"],
-    "NG_Fact": ["NG_Fact"],
-    "NG_Installed": ["NG_Installed"],
-}
+    RUN_YEAR = 2050
+    RUN_I = RUN_YEAR - 2022 + 12  # matches original loop logic
 
+    # ---- Put your optimized parameters here ----
+    Solar_Installed = 30000  # MW
+    Wind_Installed = 40000 / 3200  # normalized, because code multiplies by 3200
+    Baseload_Installed = 25000  # MW nuclear
+    Grid_Store_Max = 15000  # MWh
+    Factor_V2G = 0.5
+    Factor_NSC = 0.15
+    Factor_Smart_Charge = 1 - Factor_NSC
+    V2G_Connect_Cost = 2000
 
-def get_scenario_value(row, canonical_name, default=None):
-    for col in COLUMN_ALIASES.get(canonical_name, [canonical_name]):
-        if col in row.index and pd.notna(row[col]):
-            return row[col]
-    return default
+    SC_CR = 0.0475
+    V2G_CR = 0.0475
+    V2G_DR = 0.0475
+    SC_Floor = 30
+    V2G_Floor = 30
+    Cap = 0.8
 
+    # ---- Force no natural gas ----
+    NG_Fact = 0.0
+    NG_Installed = 0.0
 
-def apply_scenario_row(row):
-    """
-    Applies one candidate scenario to the global variables used by
-    do_parallel_monte_carlo().
-    """
-    global Solar_Installed
-    global Wind_Installed
-    global Baseload_Installed
-    global Grid_Store_Max
-    global Factor_V2G
-    global Factor_NSC
-    global Factor_Smart_Charge
-    global NG_Fact
-    global NG_Installed
-    global V2G_Connect_Cost
+    folder_name = (
+        "Output_Files_Merge/"
+        f"single_2050_no_ng_"
+        f"V2G_{Factor_V2G}_SC_{Factor_Smart_Charge}"
+    )
+    os.makedirs(folder_name, exist_ok=True)
 
-    Solar_Installed = float(get_scenario_value(row, "Solar_Installed", Solar_Installed))
+    #Share_EV_init = (
+     #                       np.exp(c1 + c2 * RUN_I) / (1 + np.exp(c1 + RUN_I * c2))
+     #               ) - 0.01
 
-    # Internal code expects normalized wind, but input tables usually store MW.
-    wind_installed_mw = float(get_scenario_value(row, "Wind_Installed_MW", Wind_Installed * 3200))
-    Wind_Installed = wind_installed_mw / 3200
+    Share_EV_init = 1
 
-    Baseload_Installed = float(get_scenario_value(row, "Baseload_Installed", Baseload_Installed))
-    Grid_Store_Max = float(get_scenario_value(row, "Grid_Store_Max", Grid_Store_Max))
+    print("\n" + "=" * 80)
+    print("RUNNING SINGLE 2050 NO-NATURAL-GAS AUDIT CASE")
+    print("=" * 80)
+    print(f"Year: {RUN_YEAR}")
+    print(f"Share_EV_init: {Share_EV_init:.6f}")
+    print(f"Solar_Installed MW: {Solar_Installed:,.2f}")
+    print(f"Wind_Installed MW: {Wind_Installed * 3200:,.2f}")
+    print(f"Baseload_Installed MW: {Baseload_Installed:,.2f}")
+    print(f"Grid_Store_Max MWh: {Grid_Store_Max:,.2f}")
+    print(f"Factor_V2G: {Factor_V2G}")
+    print(f"Factor_Smart_Charge: {Factor_Smart_Charge}")
+    print(f"NG_Fact: {NG_Fact}")
+    print(f"NG_Installed: {NG_Installed}")
+    print("=" * 80 + "\n")
 
-    Factor_V2G = float(get_scenario_value(row, "Factor_V2G", Factor_V2G))
-    Factor_NSC = float(get_scenario_value(row, "Factor_NSC", Factor_NSC))
-
-    default_smart_charge = 1.0 - Factor_NSC
-    Factor_Smart_Charge = float(
-        get_scenario_value(row, "Factor_Smart_Charge", default_smart_charge)
+    results = do_parallel_monte_carlo(
+        Share_EV_init=Share_EV_init,
+        evcharge=0,
+        year=RUN_YEAR,
+        n_simulations=1,
+        min_pass_count=1,
+        SC_CR=SC_CR,
+        V2G_CR=V2G_CR,
+        V2G_DR=V2G_DR,
+        SC_Floor=SC_Floor,
+        V2G_Floor=V2G_Floor,
+        Cap=Cap,
+        V2G_Connect_Cost=V2G_Connect_Cost,
     )
 
-    NG_Fact = float(get_scenario_value(row, "NG_Fact", 0.0))
-    NG_Installed = float(get_scenario_value(row, "NG_Installed", 0.0))
+    print("\n" + "=" * 80)
+    print("SINGLE 2050 RUN RESULT")
+    print("=" * 80)
+    print(f"Status: {results['status']}")
+    print(f"Pass Count: {results.get('pass_count')}/10")
 
-    V2G_Connect_Cost = float(
-        get_scenario_value(row, "V2G_Connect_Cost", V2G_Connect_Cost)
-    )
+    if results["status"] == "failure":
+        for idx, sim in enumerate(results["details"], start=1):
+            print(
+                f"Run {idx}: "
+                f"failed={sim['failed']}, "
+                f"reason={sim['failure_reason']}, "
+                f"total_deficit={sim['total_energy_deficit']:.2f}, "
+                f"curtailment={sim['total_curtailment']:.2f}"
+            )
+    else:
+        print(f"Combined LCOE: {results['combined_lcoe']:.4f}")
+        print(f"Total Deficit: {results['total_energy_deficit']:.2f}")
+        print(f"Curtailment: {results['total_curtailment']:.2f}")
+        print(f"Total V2G: {results['total_V2G']:.2f}")
+        print(f"Total Grid Battery Used: {results['total_GS_used']:.2f}")
+        print(f"Grid CO2 Tonnes: {results['total_grid_carbon_tonnes']:.2f}")
 
+        print("\nLCOE values:")
+        for source, value in results["lcoe_values"].items():
+            print(f"  {source}: {value}")
 
-def validate_one_scenario(row, scenario_id):
-    apply_scenario_row(row)
+        print("\nCarbon-adjusted LCOE:")
+        for case, value in results["carbon_adjusted_lcoe_by_case"].items():
+            print(f"  {case}: {value}")
 
-    share_ev_init = float(
-        get_scenario_value(row, "Share_EV_init", DEFAULT_SHARE_EV_INIT)
-    )
+        print("\nSystem balance:")
+        for key, value in results["system_balance"].items():
+            print(f"  {key}: {value}")
 
-    sc_cr = float(get_scenario_value(row, "SC_CR", 0.0475))
-    v2g_cr = float(get_scenario_value(row, "V2G_CR", sc_cr))
-    v2g_dr = float(get_scenario_value(row, "V2G_DR", v2g_cr))
+        print("\nStorage summary:")
+        for key, value in results["storage_summary"].items():
+            print(f"  {key}: {value}")
 
-    sc_floor = float(get_scenario_value(row, "SC_Floor", 30))
-    v2g_floor = float(get_scenario_value(row, "V2G_Floor", 30))
-    cap = float(get_scenario_value(row, "Cap", 0.8))
+        print("\nEV demand breakdown:")
+        for key, value in results["ev_demand_breakdown"].items():
+            print(f"  {key}: {value}")
 
-    successful_lcoes = []
-    failed_runs = []
+        audit_report = {
+            "run_type": "single_2050_no_natural_gas",
+            "input_parameters": {
+                "Year": RUN_YEAR,
+                "Share_EV_init": Share_EV_init,
+                "Solar_Installed_MW": Solar_Installed,
+                "Wind_Installed_MW": Wind_Installed * 3200,
+                "Baseload_Installed_MW": Baseload_Installed,
+                "Grid_Store_Max_MWh": Grid_Store_Max,
+                "Factor_V2G": Factor_V2G,
+                "Factor_NSC": Factor_NSC,
+                "Factor_Smart_Charge": Factor_Smart_Charge,
+                "SC_CR": SC_CR,
+                "V2G_CR": V2G_CR,
+                "V2G_DR": V2G_DR,
+                "SC_Floor": SC_Floor,
+                "V2G_Floor": V2G_Floor,
+                "Cap": Cap,
+                "V2G_Connect_Cost": V2G_Connect_Cost,
+                "NG_Fact": NG_Fact,
+                "NG_Installed": NG_Installed,
+            },
+            "results": results,
+        }
 
-    for run_idx in range(VALIDATION_RUNS_PER_SCENARIO):
+        audit_path = Path(folder_name) / "single_2050_no_ng_audit_report.json"
+        with open(audit_path, "w") as f:
+            json.dump(to_builtin(audit_report), f, indent=4)
+
+        summary_df = pd.DataFrame([{
+            "Year": RUN_YEAR,
+            "EV_Fleet_Size": Share_EV_init,
+            "Installed_Solar": Solar_Installed,
+            "Installed_Wind": Wind_Installed * 3200,
+            "Installed_Nuclear": Baseload_Installed,
+            "Installed_Grid_Batteries": Grid_Store_Max,
+            "NG_Fact": NG_Fact,
+            "Combined_LCOE": results["combined_lcoe"],
+            "Total_Deficit": results["total_energy_deficit"],
+            "Curtailment": results["total_curtailment"],
+            "V2G_Total": results["total_V2G"],
+            "Total_GS_Used": results["total_GS_used"],
+            "Total_Grid_CO2_Tonnes": results["total_grid_carbon_tonnes"],
+            "Carbon_Adjusted_LCOE_SCC_51": results["carbon_adjusted_lcoe_by_case"]["SCC_51"],
+            "Carbon_Adjusted_LCOE_SCC_120": results["carbon_adjusted_lcoe_by_case"]["SCC_120"],
+            "Carbon_Adjusted_LCOE_SCC_190": results["carbon_adjusted_lcoe_by_case"]["SCC_190"],
+            "Carbon_Adjusted_LCOE_SCC_340": results["carbon_adjusted_lcoe_by_case"]["SCC_340"],
+        }])
+
+        summary_path = Path(folder_name) / "single_2050_no_ng_summary.csv"
+        summary_df.to_csv(summary_path, index=False)
+
+        print(f"\nSaved audit report to: {audit_path}")
+        print(f"Saved summary CSV to: {summary_path}")
+
+        output_yearly_df_case = pd.DataFrame(output_yearly)
+
+        output_yearly_df_case.to_csv(
+            f"{reliability_folder_name}/output_yearly_with_battery.csv",
+            index=False,
+        )
+
+        #all_reliability_outputs[reliability_label] = output_yearly_df_case
+
+    audit_lcoes = []
+
+    for run_idx in range(50):
         results = do_parallel_monte_carlo(
-            Share_EV_init=share_ev_init,
+            Share_EV_init=0.98,
             evcharge=0,
-            year=VALIDATION_YEAR,
+            year=2050,
             n_simulations=1,
             min_pass_count=1,
-            SC_CR=sc_cr,
-            V2G_CR=v2g_cr,
-            V2G_DR=v2g_dr,
-            SC_Floor=sc_floor,
-            V2G_Floor=v2g_floor,
-            Cap=cap,
+            SC_CR=SC_CR,
+            V2G_CR=V2G_CR,
+            V2G_DR=V2G_DR,
+            SC_Floor=SC_Floor,
+            V2G_Floor=V2G_Floor,
+            Cap=Cap,
             V2G_Connect_Cost=V2G_Connect_Cost,
         )
 
         if results["status"] == "success":
-            successful_lcoes.append(results["combined_lcoe"])
-        else:
-            failed_runs.append({
-                "scenario_id": scenario_id,
-                "run_idx": run_idx,
-                "pass_count": results.get("pass_count", 0),
-                "failure_reason": results["details"][0].get("failure_reason", ""),
-                "total_energy_deficit": results["details"][0].get("total_energy_deficit", np.nan),
-                "total_curtailment": results["details"][0].get("total_curtailment", np.nan),
-            })
+            audit_lcoes.append(results["combined_lcoe"])
 
-    successful_runs = len(successful_lcoes)
-    failed_run_count = VALIDATION_RUNS_PER_SCENARIO - successful_runs
+    print("\n===== 2050 STOCHASTIC LCOE CHECK =====")
+    print(f"Successful runs: {len(audit_lcoes)}")
+    print(f"Mean LCOE: {np.mean(audit_lcoes):.3f}")
+    print(f"Std LCOE: {np.std(audit_lcoes):.3f}")
+    print(f"Min LCOE: {np.min(audit_lcoes):.3f}")
+    print(f"Max LCOE: {np.max(audit_lcoes):.3f}")
 
-    summary = {
-        "scenario_id": scenario_id,
-        "successful_runs": successful_runs,
-        "failed_runs": failed_run_count,
-        "validation_runs": VALIDATION_RUNS_PER_SCENARIO,
 
-        "mean_lcoe": np.mean(successful_lcoes) if successful_lcoes else np.nan,
-        "std_lcoe": np.std(successful_lcoes, ddof=1) if successful_runs > 1 else np.nan,
-        "min_lcoe": np.min(successful_lcoes) if successful_lcoes else np.nan,
-        "max_lcoe": np.max(successful_lcoes) if successful_lcoes else np.nan,
 
-        "Solar_Installed_MW": Solar_Installed,
-        "Wind_Installed_MW": Wind_Installed * 3200,
-        "Baseload_Installed_MW": Baseload_Installed,
-        "Grid_Store_Max_MWh": Grid_Store_Max,
-        "Factor_V2G": Factor_V2G,
-        "Factor_NSC": Factor_NSC,
-        "Factor_Smart_Charge": Factor_Smart_Charge,
-        "SC_CR": sc_cr,
-        "V2G_CR": v2g_cr,
-        "V2G_DR": v2g_dr,
-        "SC_Floor": sc_floor,
-        "V2G_Floor": v2g_floor,
-        "Cap": cap,
-        "V2G_Connect_Cost": V2G_Connect_Cost,
-        "Share_EV_init": share_ev_init,
-        "NG_Fact": NG_Fact,
-        "NG_Installed": NG_Installed,
+
+
+
+
+def save_final_audit_report(output_yearly_df, results, folder_name):
+    last_row = output_yearly_df.iloc[-1].to_dict()
+
+    audit_report = {
+        "final_year_summary": last_row,
+        "final_model_state": {
+            "Solar_Installed_MW": Solar_Installed,
+            "Wind_Installed_MW": Wind_Installed * 3200,
+            "Baseload_Installed_MW": Baseload_Installed,
+            "Grid_Store_Max_MWh": Grid_Store_Max,
+            "NG_Fact": NG_Fact,
+            "Factor_V2G": Factor_V2G,
+            "Factor_NSC": Factor_NSC,
+            "Factor_Smart_Charge": Factor_Smart_Charge,
+            "system_balance": results.get("system_balance"),
+            "gross_generation_by_source_mwh": results.get("gross_generation_by_source_mwh"),
+            "ev_demand_breakdown": results.get("ev_demand_breakdown"),
+            "storage_summary": results.get("storage_summary"),
+
+        },
+        "final_results_detail": {
+            "combined_lcoe": results.get("combined_lcoe"),
+            "lcoe_values": results.get("lcoe_values"),
+            "battery_wear": results.get("battery_wear"),
+            "carbon_cost_by_case": results.get("carbon_cost_by_case"),
+            "carbon_adjusted_lcoe_by_case": results.get("carbon_adjusted_lcoe_by_case"),
+            "vehicle_carbon_cost_by_case": results.get("vehicle_carbon_cost_by_case"),
+            "total_carbon_cost_by_case": results.get("total_carbon_cost_by_case"),
+            "total_grid_carbon_tonnes": results.get("total_grid_carbon_tonnes"),
+            "total_co2_tonnes_by_lca_case": results.get("total_co2_tonnes_by_lca_case"),
+            "total_curtailment": results.get("total_curtailment"),
+            "total_V2G": results.get("total_V2G"),
+            "total_GS_used": results.get("total_GS_used"),
+            "total_energy_deficit": results.get("total_energy_deficit"),
+        },
     }
 
-    return summary, failed_runs
+    audit_path = Path(folder_name) / "final_iteration_audit_report.json"
+    with open(audit_path, "w") as f:
+        json.dump(to_builtin(audit_report), f, indent=4)
 
-
-def run_scenario_validation():
-    scenarios_df = pd.read_csv(SCENARIO_CSV_PATH)
-
-    summaries = []
-    all_failed_runs = []
-
-    for scenario_id, row in scenarios_df.iterrows():
-        print("\n" + "=" * 80)
-        print(f"VALIDATING SCENARIO {scenario_id + 1}/{len(scenarios_df)}")
-        print("=" * 80)
-
-        summary, failed_runs = validate_one_scenario(row, scenario_id)
-
-        summaries.append(summary)
-        all_failed_runs.extend(failed_runs)
-
-        print(f"Successful runs: {summary['successful_runs']}/{summary['validation_runs']}")
-        print(f"Mean LCOE: {summary['mean_lcoe']:.4f}")
-        print(f"Std LCOE: {summary['std_lcoe']:.4f}")
-        print(f"Min LCOE: {summary['min_lcoe']:.4f}")
-        print(f"Max LCOE: {summary['max_lcoe']:.4f}")
-
-    summary_df = pd.DataFrame(summaries)
-
-    summary_df = summary_df.sort_values(
-        by=["successful_runs", "mean_lcoe"],
-        ascending=[False, True],
+    pd.DataFrame([last_row]).to_csv(
+        Path(folder_name) / "final_iteration_summaryCO2.csv",
+        index=False,
     )
 
-    failed_df = pd.DataFrame(all_failed_runs)
-
-    summary_path = VALIDATION_OUTPUT_FOLDER / "scenario_validation_summary.csv"
-    failed_path = VALIDATION_OUTPUT_FOLDER / "scenario_validation_failed_runs.csv"
-
-    summary_df.to_csv(summary_path, index=False)
-    failed_df.to_csv(failed_path, index=False)
-
-    print("\n" + "=" * 80)
-    print("VALIDATION COMPLETE")
-    print("=" * 80)
-    print(f"Saved summary to: {summary_path}")
-    print(f"Saved failed run details to: {failed_path}")
-
-    print("\nBest validated scenario:")
-    print(summary_df.iloc[0].to_string())
-
-    return summary_df, failed_df
-
-
-validation_summary_df, validation_failed_df = run_scenario_validation()
+    print(f"Saved final audit report to: {audit_path}")
 
 
 # Print the variable selection in an easy-to-read format
